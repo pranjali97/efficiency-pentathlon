@@ -1,18 +1,13 @@
 import os
 import sys
-from typing import List, Optional, Tuple
-import json
+from typing import Optional, Tuple
+
 import click
 from click_help_colors import HelpColorsCommand, HelpColorsGroup
 
 from efficiency_benchmark.steps import (CalculateMetricsStep, LogOutputStep,
                                         PredictStep, TabulateMetricsStep)
-from eb_gantry.__main__ import run as gantry_run
-from eb_gantry.constants import GITHUB_TOKEN_SECRET
-from efficiency_benchmark.tasks import TASKS
-from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkWrapper
-from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkHuggingfaceTask
-from efficiency_benchmark.utils import parse_gpu_ids
+from gantry.__main__ import run as gantry_run
 
 
 _CLICK_GROUP_DEFAULTS = {
@@ -38,14 +33,6 @@ def main():
 @main.command(**_CLICK_COMMAND_DEFAULTS)
 @click.argument("cmd", nargs=-1)
 @click.option(
-    "-h",
-    "--hf_dataset_args",
-    type=str,
-    nargs=1,
-    help="""Args for Huggingface load_dataset.""",
-    default=None
-)
-@click.option(
     "-t",
     "--task",
     type=str,
@@ -62,8 +49,15 @@ def main():
     "-s",
     "--scenario",
     type=str,
-    default="fixed_batch",
-    help="""Evaluation scenario [single_stream, fixed_batch, random_batch, offline].""",
+    default="single_stream",
+    help="""Evaluation scenario [single_stream, random_batch, offline].""",
+)
+@click.option(
+    "-b",
+    "--max_batch_size",
+    type=int,
+    default=32,
+    help="""Maximum batch size.""",
 )
 @click.option(
     "-o",
@@ -85,54 +79,32 @@ def main():
     default=-1,
     help="""Limit.""",
 )
-@click.option(
-    "--gpu_ids",
-    "-g",
-    type=str,
-    help="""The IDs of the GPUs to use. Example: `--gpus 0,1`. 
-    If not specified, the environment variable `CUDA_VISIBLE_DEVICES` will be used.
-    Otherwise GPUs will not be profiled.""",
-    default=""
-)
 def run(
     cmd: Tuple[str, ...],
-    task: Optional[str] = None,
-    hf_dataset_args: Optional[str] = None,
+    task: str,
     split: str = "test",
-    scenario: str = "fixed_batch",
+    scenario: str = "accuracy",
+    max_batch_size: int = 32,
     offline_dir: str = f"{os.getcwd()}/datasets/efficiency-beenchmark",
     limit: Optional[int] = -1,
     output_dir: Optional[str] = None,
-    is_submission: Optional[bool] = False,
-    gpu_ids: str = ""
 ):
-    if not gpu_ids and "CUDA_VISIBLE_DEVICES" in os.environ:
-        gpu_ids = os.environ["CUDA_VISIBLE_DEVICES"]
-    gpu_ids = parse_gpu_ids(gpu_ids) # if gpus else None
-    assert task or hf_dataset_args, "The evaluation data should be specified by either --task or --hf_dataset_args"
+    
     if scenario == "offline":
         try:
             os.makedirs(offline_dir, exist_ok=True)
         except:
             sys.exit(f"Failed to write to offline directory: {offline_dir}.")
 
-    if hf_dataset_args is not None:
-        hf_dataset_args = json.loads(hf_dataset_args)
-        if task is not None:
-            print(f"--task is {task}, but is overwritten by --hf_dataset_args: {hf_dataset_args}")
-        task: EfficiencyBenchmarkWrapper = EfficiencyBenchmarkHuggingfaceTask(hf_dataset_args)
-    else:
-        task: EfficiencyBenchmarkWrapper = TASKS[task]
     metric_task_dict = {}
     prediction_step = PredictStep(
         cmd=cmd,
         task=task,
         scenario=scenario,
+        max_batch_size=max_batch_size,
         offline_dir=offline_dir,
         split=split,
         limit=limit,
-        is_submission=is_submission,
-        gpu_ids=gpu_ids
     )
     if output_dir:
         output_dir = prediction_step.task.base_dir(base_dir=output_dir)
@@ -170,22 +142,6 @@ def run(
     type=str,
     nargs=1,
     help="""Tasks.""",
-    default=None
-)
-@click.option(
-    "-h",
-    "--hf_dataset_args",
-    type=str,
-    nargs=1,
-    help="""Args for Huggingface load_dataset.""",
-    default=None
-)
-@click.option(
-    "-n",
-    "--name",
-    type=str,
-    default=None,
-    help="""Name.""",
 )
 @click.option(
     "--split",
@@ -199,59 +155,47 @@ def run(
     default=None,
     help="""Limit.""",
 )
-# @click.option(
-#     "--gpus",
-#     type=int,
-#     help="""Number of GPUs (e.g. 1).""",
-# )
 @click.option(
-    "--allow-dirty",
-    is_flag=True,
-    help="""Allow submitting the experiment with a dirty working directory.""",
+    "-b",
+    "--max_batch_size",
+    type=int,
+    default=32,
+    help="""Maximum batch size.""",
 )
 @click.option(
-    "--install",
-    type=str,
-    help="""Override the default installation command, e.g. '--install "python setup.py install"'""",
+    "--cpus",
+    type=float,
+    help="""Minimum number of logical CPU cores (e.g. 4.0, 0.5).""",
 )
 @click.option(
-    "--gh-token-secret",
+    "--dataset",
     type=str,
-    help="""The name of the Beaker secret that contains your GitHub token.""",
-    default=GITHUB_TOKEN_SECRET,
-    show_default=True,
+    multiple=True,
+    help="""An input dataset in the form of 'dataset-name:/mount/location' to attach to your experiment.
+    You can specify this option more than once to attach multiple datasets.""",
 )
 def submit(
     cmd: Tuple[str, ...],
-    task: Optional[str] = None,
-    hf_dataset_args: Optional[str] = None,
-    name: Optional[str] = None,
+    task: str,
     split: str = "validation",
     limit: int = None,
-    gpus: Optional[int] = None,
-    allow_dirty: bool = False,
-    gh_token_secret: str = GITHUB_TOKEN_SECRET,
-    install: Optional[str] = None,
+    max_batch_size: int = 32,
+    cpus: Optional[float] = None,
+    dataset: Optional[Tuple[str, ...]] = None,
 ):
-    # bsz
     gantry_run(
         arg=cmd,
         task=task,
-        hf_dataset_args=hf_dataset_args,
-        name=name,
         split=split,
         limit=limit,
+        max_batch_size=max_batch_size,
         cluster=["efficiency-benchmark/elanding-rtx-8000"], # TODO
-        beaker_image="haop/efficiency-benchmark",
+        beaker_image="haop/efficiency-benchmark",  # TODO
         workspace="efficiency-benchmark/efficiency-benchmark",
-        mount=["/hf_datasets:/hf_datasets"],
-        allow_dirty=allow_dirty,
-        gh_token_secret=gh_token_secret,
-        install=install,
-        # Hardcode number of GPUs and CPUs to the max available amount below,
-        # to make sure that only one job runs at a time.
-        cpus=108,
-        gpus=2,
+        cpus=cpus,
+        gpus=2,  # hard code to 2 to make sure only one job runs at a time.
+        allow_dirty=True,
+        dataset=dataset
     )
 
 

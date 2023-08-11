@@ -11,7 +11,7 @@ from datasets import Dataset
 from efficiency_benchmark.efficiency.profiler import Profiler
 from efficiency_benchmark.stdio_wrapper import StdioWrapper
 from efficiency_benchmark.task import Task
-from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkWrapper
+from efficiency_benchmark.tasks import TASKS, EfficiencyBenchmarkTask
 from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkInstance
 
 EXPECTED_BATCH_SIZE = 128
@@ -23,22 +23,30 @@ class PredictStep():
         self,
         *,
         cmd: List[str],
-        task: EfficiencyBenchmarkWrapper,
+        task: str,
         scenario: str,
+        max_batch_size: int,
         offline_dir: str,
         split: Optional[str] = None,
         limit: Optional[int] = None,
         **kwargs
     ):
         np.random.seed(42)
-        self.task = task
-        self.split = split if split is not None else self.task.default_split
+        self.task: EfficiencyBenchmarkTask = TASKS[task]
+        if scenario == "offline" and "raft" not in task:
+            # We prefer training split for the offline scenario, which usually has more data
+            # RAFT's training data is tiny, thus we use the test split for the offline scenario
+            self.split = "train"
+        else:
+            self.split = split if split is not None else self.task.default_split
+            
         self.scenario = scenario
+        self.max_batch_size = max_batch_size
         self.offline_dir = offline_dir
         self.limit = limit
         self.cmd = cmd
         self.predictor = StdioWrapper(cmd=cmd)
-        self.profiler = Profiler(interval=0.1, **kwargs)
+        self.profiler = Profiler(interval=0.1)
         self.targets = None
 
         self._prepare_data()
@@ -65,8 +73,8 @@ class PredictStep():
             instances = [ instances[i] for i in indices]
         self.num_instances = len(instances)
 
-        if self.scenario in ["fixed_batch", "accuracy"]:
-            batches = list(more_itertools.chunked(instances, EXPECTED_BATCH_SIZE))
+        if self.scenario == "accuracy":
+            batches = list(more_itertools.chunked(instances, self.max_batch_size))
         elif self.scenario == "single_stream":
             batches = list(more_itertools.chunked(instances, 1))
         elif self.scenario == "random_batch":
@@ -83,19 +91,20 @@ class PredictStep():
                 if idx >= len(instances):
                     break
         else:
-            raise ValueError(f"Unknown scenario: {self.scenario}. Choose from 'single_stream', 'fixed_batch', 'random_batch', 'offline'")
+            raise ValueError(f"Unknown scenario: {self.scenario}. Choose from 'single_stream', 'random_batch', 'offline'")
 
         self.num_batches = len(batches)
         assert self.num_instances == sum(len(batch) for batch in batches)
 
-        self.batches = batches
-        # self.input_batches = [ [instance.input for instance in batch] for batch in batches]
+        self.input_batches = [ [instance.input for instance in batch] for batch in batches]
         if self.scenario == "accuracy":
             target_batches = [ [instance.target for instance in batch] for batch in batches]
             self.targets = list(itertools.chain(*target_batches))
             assert len(self.targets) == self.num_instances
 
     def massage_kwargs(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(kwargs["task"], str):
+            kwargs["task"] = TASKS[kwargs["task"]]
         if kwargs["split"] is None:
             kwargs["split"] = kwargs["task"].default_split
         return kwargs
@@ -138,10 +147,10 @@ class PredictStep():
 
     def run_online(self) -> Tuple[Sequence[Any], Dict[str, Any]]:
         output_batches = []
-        _ = self.predictor.dummy_predict(dummy_inputs=self.batches[-1])
+        _ = self.predictor.dummy_predict(dummy_inputs=self.input_batches[-1], max_batch_size=self.max_batch_size)
 
         self.profiler.start()
-        for output_batch in self.predictor.predict(batches=self.batches):
+        for output_batch in self.predictor.predict(input_batches=self.input_batches, max_batch_size=self.max_batch_size):
             output_batches.append(output_batch)
         efficiency_metrics = self.profiler.stop()
         results, num_output_words = self.process(output_batches)
@@ -199,8 +208,13 @@ class CalculateMetricsStep():
     _TorchmetricsResult = Union[torch.Tensor, Dict[str, '_TorchmetricsResult']]
     _CatwalkResult = Union[float, Dict[str, '_CatwalkResult']]
 
-    def __init__(self, task: EfficiencyBenchmarkWrapper):
-        self.task = task
+    def __init__(self, task: Union[str, Task]):
+        self.task = TASKS[task] if isinstance(task, str) else task
+
+    def massage_kwargs(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(kwargs["task"], str):
+            kwargs["task"] = TASKS[kwargs["task"]]
+        return kwargs
 
     def _tensor_args(self, args: Tuple[Any]) -> Tuple[Any, ...]:
         """
@@ -293,7 +307,7 @@ class TabulateMetricsStep():
 class LogOutputStep():
 
     def __init__(self, task: Union[str, Task], output_file: Optional[str] = None):
-        self.task = task
+        self.task = TASKS[task] if isinstance(task, str) else task
         self.output_file: str = output_file
 
     def run(self, predictions: Sequence[Dict[str, Any]]) -> None:

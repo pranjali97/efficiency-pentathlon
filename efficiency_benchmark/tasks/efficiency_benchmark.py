@@ -2,61 +2,53 @@ import functools
 import os
 from dataclasses import dataclass
 from random import Random
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import datasets
 import numpy as np
-from datasets import Dataset, DatasetDict
+from datasets import Dataset
 
-from efficiency_benchmark.dependencies.lm_eval.base import Task as EAITask
 from efficiency_benchmark.tango_utils import MappedSequence
 from efficiency_benchmark.task import InstanceConversion, Task
 from efficiency_benchmark.tasks import InstanceFormat
-from efficiency_benchmark.tasks.eleuther import (
-    EleutherClassificationTask, EleutherClassificationTaskWithRenamedSplits,
-    EleutherTask, EleutherTaskWithRenamedSplits, RaceEleutherTask)
-from efficiency_benchmark.tasks.huggingface import (HFDatasetsTask,
-                                                    get_from_dict)
-from efficiency_benchmark.tasks.metaicl import MetaICLTask
-from efficiency_benchmark.tasks.mrqa import MrqaTask
-from efficiency_benchmark.tasks.p3 import P3Task
-from efficiency_benchmark.tasks.raft import RaftTask
+from efficiency_benchmark.tasks.huggingface import get_from_dict
+
 
 NUM_SINGLE_STREAM_INSTANCES = 1000
 NUM_RANDOM_BATCH_INSTANCES = 4000
 NUM_OFFLINE_INSTANCES = 8000
 
 
-def identity_conversion(
-    **kwargs
-) -> InstanceConversion:
-    def convert(
-        instance: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        return instance
-    # We're doing this in this stupid way because this makes the conversion function picklable.
-    return functools.partial(convert, **kwargs)
+@dataclass
+class EfficiencyBenchmarkInstance:
+    input: Union[str, Dict[str, Any]]
+    target: Optional[str]
+    id: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {"input": self.input}
+        if self.target is not None:
+            d["target"] = self.target
+        if self.id is not None:
+            d["id"] = self.id
+        return d
 
 
-# @dataclass
-# class EfficiencyBenchmarkInstance:
-#     # A wrapper of an instance
-#     instance: Union[str, Dict[str, Any]]
-#     target: Optional[str] = None
-#     id: Optional[int] = None
-
-#     def to_dict(self) -> Dict[str, Any]:
-#         d = {"input": self.input}
-#         if self.target is not None:
-#             d["target"] = self.target
-#         return d
-EfficiencyBenchmarkInstance = Dict[str, Any]
-
-
-class EfficiencyBenchmarkWrapper():
-    def __init__(self):
-        Task.__init__(self)
+class EfficiencyBenchmarkTask(Task):
+    def __init__(
+        self,
+        dataset_path: str,
+        dataset_name: Optional[str] = None,
+        *,
+        version_override: Optional[str] = None
+    ):
+        Task.__init__(self, version_override=version_override)
+        self.dataset_path = dataset_path
+        self.dataset_name = dataset_name
         self.online_instances: List[EfficiencyBenchmarkInstance] = None
+
+    def has_split(self, split: str) -> bool:
+        return split in datasets.get_dataset_split_names(self.dataset_path, self.dataset_name)
 
     def base_dir(self, base_dir: str) -> str:
         return os.path.join(base_dir, self.dataset_path, self.dataset_name)
@@ -138,72 +130,13 @@ class EfficiencyBenchmarkWrapper():
         funcs = {
             "single_stream": self.get_single_stream_instances,
             "random_batch": self.get_random_batch_instances,
-            "fixed_batch": self.get_instances,
             "accuracy": self.get_instances,
         }
         return funcs[scenario](split=split)
-
-
-class EfficiencyBenchmarkHuggingfaceTask(EfficiencyBenchmarkWrapper, Task):
-    """A wrapper for huggingface datasets."""
-    def __init__(
-        self,
-        hf_dataset_args: Dict[str, Any],
-        *,
-        version_override: Optional[str] = None
-    ):  
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.hf_dataset_args = hf_dataset_args
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            identity_conversion()
-        )
-    
-    def dataset(self):
-        return datasets.load_dataset(**self.hf_dataset_args)
-
-    def has_split(self, split: str) -> bool:
-        return split in datasets.get_dataset_split_names(**self.hf_dataset_args)
-    
-    def get_split(self, split: str) -> Sequence[Dict[str, Any]]:
-        ds = self.dataset()
-        if "split" in self.hf_dataset_args.keys():
-            print(f"Using {self.hf_dataset_args['split']} split specified in hf_dataset_args")
-            assert isinstance(ds, Dataset)
-        else:
-            assert isinstance(ds, DatasetDict)
-            ds = ds[split]
-        # HF datasets are not sequences, even though they sometimes pretend they are. So we apply this hack
-        # to make them act like sequences.
-        ds = MappedSequence(lambda x: x, ds)
-        return ds
-    
-
-class EfficiencyBenchmarkTranslationTask(EfficiencyBenchmarkWrapper, Task):
-    def __init__(
-        self,
-        dataset_path: str,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
-    ):  
-        Task.__init__(self, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.dataset_path = dataset_path
-        self.dataset_name = dataset_name
-        # input_field, target_field = dataset_name.split("-")
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkTranslationTask._conversion(input_field=input_field, target_field=target_field)
-            identity_conversion()
-        )
-
+        
     def dataset(self, split: str):
         return datasets.load_dataset(self.dataset_path, self.dataset_name, split=split)
 
-    def has_split(self, split: str) -> bool:
-        return split in datasets.get_dataset_split_names(self.dataset_path, self.dataset_name)
-    
     def get_split(self, split: str) -> Sequence[Dict[str, Any]]:
         ds = self.dataset(split=split)
         # HF datasets are not sequences, even though they sometimes pretend they are. So we apply this hack
@@ -211,112 +144,37 @@ class EfficiencyBenchmarkTranslationTask(EfficiencyBenchmarkWrapper, Task):
         ds = MappedSequence(lambda x: x, ds)
         return ds
 
-    @staticmethod
-    def _conversion(
-        **kwargs
-    ) -> InstanceConversion:
-        def convert(
-            instance: Dict[str, Any],
-            *,
-            input_field: str,
-            target_field: str,
-            id_field: Optional[str] = None
-        ) -> EfficiencyBenchmarkInstance:
-            instance = instance["translation"]
-            input = get_from_dict(instance, input_field)
-            target = get_from_dict(instance, target_field)
-            return EfficiencyBenchmarkInstance(
-                id=str(get_from_dict(instance, id_field)) if id_field else None,
-                instance=input,
-                target=target
-            )
-        # We're doing this in this stupid way because this makes the conversion function picklable.
-        return functools.partial(convert, **kwargs)
+
+# class EfficiencyBenchmarkTranslationTask(EfficiencyBenchmarkTask):
+#     def __init__(
+#         self,
+#         dataset_path: str,
+#         dataset_name: Optional[str] = None,
+#         *,
+#         version_override: Optional[str] = None
+#     ):
+#         EfficiencyBenchmarkTask.__init__(self, dataset_path, dataset_name, version_override=version_override)
 
 
-class EfficiencyBenchmarkClassificationTask(EfficiencyBenchmarkWrapper, Task):
+# class EfficiencyBenchmarkClassificationTask(EfficiencyBenchmarkTask):
+#     def __init__(
+#         self,
+#         dataset_path: str,
+#         dataset_name: Optional[str] = None,
+#         *,
+#         version_override: Optional[str] = None
+#     ):
+#         EfficiencyBenchmarkTask.__init__(self, dataset_path, dataset_name, version_override=version_override)
+
+
+class EfficiencyBenchmarkPromptTask(EfficiencyBenchmarkTask):
     def __init__(
         self,
         dataset_path: str,
         dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
-    ):  
-        Task.__init__(self, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.dataset_path = dataset_path
-        self.dataset_name = dataset_name
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            identity_conversion()
-        )
-    
-    def dataset(self, split: str):
-        return datasets.load_dataset(self.dataset_path, self.dataset_name, split=split)
-
-    def has_split(self, split: str) -> bool:
-        return split in datasets.get_dataset_split_names(self.dataset_path, self.dataset_name)
-    
-    def get_split(self, split: str) -> Sequence[Dict[str, Any]]:
-        ds = self.dataset(split=split)
-        # HF datasets are not sequences, even though they sometimes pretend they are. So we apply this hack
-        # to make them act like sequences.
-        ds = MappedSequence(lambda x: x, ds)
-        return ds
-
-    @staticmethod
-    def conversion(
-        **kwargs,
-    ) -> InstanceConversion:
-
-        def convert(
-            instance: Dict[str, Any],
-            *,
-            label_map: Dict[int, str],
-            premise_field: str = "premise",
-            hypothesis_field: Optional[str] = "hypothesis",
-            label_field: str = "label",
-            id_field: Optional[str] = None,
-            task_name: Optional[str] = None,
-        ) -> EfficiencyBenchmarkInstance:
-            input = {premise_field: get_from_dict(instance, premise_field)}
-            if hypothesis_field is not None:
-                input[hypothesis_field] = get_from_dict(instance, hypothesis_field)
-            if task_name:
-                input["task_name"] = task_name
-
-            label_id = int(get_from_dict(instance, label_field))
-            target = label_map[label_id]
-            return EfficiencyBenchmarkInstance(
-                input=input,
-                target=target,
-                id=str(get_from_dict(instance, id_field)) if id_field else None
-            )
-
-        # We're doing this in this stupid way because this makes the conversion function picklable.
-        return functools.partial(convert, **kwargs)
-
-
-class EfficiencyBenchmarkPromptTask(EfficiencyBenchmarkWrapper, Task):
-    def __init__(
-        self,
-        dataset_path: str,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
     ):
-        Task.__init__(self, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.dataset_path = dataset_path
-        self.dataset_name = dataset_name
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            EfficiencyBenchmarkPromptTask._conversion(max_length=128)
-        )
+        EfficiencyBenchmarkTask.__init__(self, dataset_path, dataset_name)
 
-    def has_split(self, split: str) -> bool:
-        return split in datasets.get_dataset_split_names(self.dataset_path, self.dataset_name)
-    
     def get_split(self, split: str) -> Sequence[Dict[str, Any]]:
         ds = self.dataset(split=split)
         cleaned_data = []
@@ -329,290 +187,113 @@ class EfficiencyBenchmarkPromptTask(EfficiencyBenchmarkWrapper, Task):
         # to make them act like sequences.
         ds = MappedSequence(lambda x: x, ds)
         return ds
-    
-    def dataset(self, split: str):
-        return datasets.load_dataset(self.dataset_path, self.dataset_name, split=split)
-    
-    @staticmethod
-    def _conversion(
-        **kwargs,
-    ) -> InstanceConversion:
-
-        def convert(
-            instance: Dict[str, Any],
-            max_length: int = 512
-        ) -> EfficiencyBenchmarkInstance:
-            text = instance["text"]
-            random_length = np.random.randint(max_length)
-            text = " ".join(text.split()[:random_length])
-            return EfficiencyBenchmarkInstance(
-                input=text,
-                target=None,
-                id=None
-            )
-
-        # We're doing this in this stupid way because this makes the conversion function picklable.
-        return functools.partial(convert, **kwargs)
 
 
-class EfficiencyBenchmarkRaftTask(EfficiencyBenchmarkWrapper, RaftTask):
+class EfficiencyBenchmarkRaftTask(EfficiencyBenchmarkTask):
     def __init__(
         self,
         subset: str
-    ):  
-        self.dataset_path = "ought/raft"
-        self.dataset_name = subset
-        EfficiencyBenchmarkWrapper.__init__(self)
-        RaftTask.__init__(self, subset)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkRaftTask._conversion(task_name="subset")
-            identity_conversion()
-        )
-
-    @staticmethod
-    def _conversion(
-        **kwargs,
-    ) -> InstanceConversion:
-
-        def convert(
-            instance: Dict[str, Any],
-            *,
-            label_field: str = "Label",
-            id_field: Optional[str] = "ID",
-            task_name: Optional[str] = None,
-        ) -> EfficiencyBenchmarkInstance:
-            
-            input = instance
-            if task_name:
-                input["task_name"] = task_name
-            if label_field in input:
-                input.pop(label_field)
-            return EfficiencyBenchmarkInstance(
-                input=input,
-                target=None,
-                id=str(get_from_dict(instance, id_field)) if id_field else None
-            )
-
-        # We're doing this in this stupid way because this makes the conversion function picklable.
-        return functools.partial(convert, **kwargs)
-
-
-class EfficiencyBenchmarkMrqaTask(EfficiencyBenchmarkWrapper, MrqaTask):
-    def __init__(
-        self,
-        dataset_path: str,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
     ):
-        MrqaTask.__init__(self, dataset_path, dataset_name, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
-        )
+        EfficiencyBenchmarkTask.__init__(self, "ought/raft", subset)
 
-    @staticmethod
-    def _conversion(
+
+def efficiency_benchmark_mt_conversion(
+    **kwargs
+) -> InstanceConversion:
+    def convert(
+        instance: Dict[str, Any],
         *,
-        context_field: str="context",
-        question_field: str="question",
-        answers_field: str="answers",
-        id_field: str="id",
-    ) -> InstanceConversion:
-        def convert(instance: Dict[str, Any]) -> EfficiencyBenchmarkInstance:
-            return EfficiencyBenchmarkInstance(
-                id=get_from_dict(instance, id_field),
-                input={
-                    "context": get_from_dict(instance, context_field),
-                    "question": get_from_dict(instance, question_field).strip(),
-                },
-                target=get_from_dict(instance, answers_field)
-            )
-        return convert
+        input_field: str,
+        target_field: str,
+        id_field: Optional[str] = None
+    ) -> EfficiencyBenchmarkInstance:
+        instance = instance["translation"]
+        input = get_from_dict(instance, input_field)
+        target = get_from_dict(instance, target_field)
+        return EfficiencyBenchmarkInstance(
+            id=str(get_from_dict(instance, id_field)) if id_field else None,
+            input=input,
+            target=target
+        )
+    # We're doing this in this stupid way because this makes the conversion function picklable.
+    return functools.partial(convert, **kwargs)
 
 
-class EfficiencyBenchmarkEleutherTask(EfficiencyBenchmarkWrapper, EleutherTask):
-    def __init__(
-        self,
-        eleuther_task: Union[str, Callable[[], EAITask]],
+def efficiency_benchmark_classification_conversion(
+    **kwargs,
+) -> InstanceConversion:
+
+    def convert(
+        instance: Dict[str, Any],
         *,
-        version_override: Optional[str] = None
-    ):
-        EleutherTask.__init__(self, eleuther_task=eleuther_task, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
+        label_map: Dict[int, str],
+        premise_field: str = "premise",
+        hypothesis_field: Optional[str] = "hypothesis",
+        label_field: str = "label",
+        id_field: Optional[str] = None,
+        task_name: Optional[str] = None,
+    ) -> EfficiencyBenchmarkInstance:
+        input = {premise_field: get_from_dict(instance, premise_field)}
+        if hypothesis_field is not None:
+            input[hypothesis_field] = get_from_dict(instance, hypothesis_field)
+        if task_name:
+            input["task_name"] = task_name
+
+        label_id = int(get_from_dict(instance, label_field))
+        target = label_map[label_id]
+        return EfficiencyBenchmarkInstance(
+            input=input,
+            target=target,
+            id=str(get_from_dict(instance, id_field)) if id_field else None
         )
 
+    # We're doing this in this stupid way because this makes the conversion function picklable.
+    return functools.partial(convert, **kwargs)
 
-class EfficiencyBenchmarkEleutherTask(EfficiencyBenchmarkWrapper, EleutherTask):
-    def __init__(
-        self,
-        eleuther_task: Union[str, Callable[[], EAITask]],
+
+def efficiency_benchmark_raft_conversion(
+    **kwargs,
+) -> InstanceConversion:
+
+    def convert(
+        instance: Dict[str, Any],
         *,
-        version_override: Optional[str] = None
-    ):
-        EleutherTask.__init__(self, eleuther_task=eleuther_task, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
-        )
-
-
-class EfficiencyBenchmarkEleutherClassificationTask(EfficiencyBenchmarkWrapper, EleutherClassificationTask):
-    def __init__(
-        self,
-        eleuther_task: Union[str, Callable[[], EAITask]],
-        *,
-        answer_options: Sequence[str],
-        version_override: Optional[str] = None
-    ):
-        EleutherClassificationTask.__init__(
-            self, 
-            eleuther_task=eleuther_task, 
-            answer_options=answer_options, 
-            version_override=version_override
-        )
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
-        )
-
+        label_field: str = "Label",
+        id_field: Optional[str] = "ID",
+        task_name: Optional[str] = None,
+    ) -> EfficiencyBenchmarkInstance:
         
-class EfficiencyBenchmarkRaceEleutherTask(EfficiencyBenchmarkWrapper, RaceEleutherTask):
-    def __init__(
-        self,
-        *,
-        version_override: Optional[str] = None
-    ):
-        RaceEleutherTask.__init__(
-            self,
-            version_override=version_override
-        )
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
+        input = instance
+        if task_name:
+            input["task_name"] = task_name
+        if label_field in input:
+            input.pop(label_field)
+        return EfficiencyBenchmarkInstance(
+            input=input,
+            target=None,
+            id=str(get_from_dict(instance, id_field)) if id_field else None
         )
 
+    # We're doing this in this stupid way because this makes the conversion function picklable.
+    return functools.partial(convert, **kwargs)
 
-class EfficiencyBenchmarkEleutherTaskWithRenamedSplits(EfficiencyBenchmarkWrapper, EleutherTaskWithRenamedSplits):
-    def __init__(
-        self,
-        eleuther_task: Union[str, Callable[[], EAITask]],
-        *,
-        version_override: Optional[str] = None
-    ):
-        EleutherTaskWithRenamedSplits.__init__(self, eleuther_task=eleuther_task, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
+
+def efficiency_benchmark_prompt_conversion(
+    **kwargs,
+) -> InstanceConversion:
+
+    def convert(
+        instance: Dict[str, Any],
+        max_length: int = 512
+    ) -> EfficiencyBenchmarkInstance:
+        text = instance["text"]
+        random_length = np.random.randint(max_length)
+        text = " ".join(text.split()[:random_length])
+        return EfficiencyBenchmarkInstance(
+            input=text,
+            target=None,
+            id=None
         )
 
-
-class EfficiencyBenchmarkEleutherClassificationTaskWithRenamedSplits(
-    EfficiencyBenchmarkWrapper, EleutherClassificationTaskWithRenamedSplits):
-    def __init__(
-        self,
-        eleuther_task: Union[str, Callable[[], EAITask]],
-        *,
-        answer_options: Sequence[str],
-        version_override: Optional[str] = None
-    ):
-        EleutherClassificationTaskWithRenamedSplits.__init__(
-            self, 
-            eleuther_task=eleuther_task, 
-            answer_options=answer_options, 
-            version_override=version_override
-        )
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
-        )
-
-
-class EfficiencyBenchmarkHFDatasetsTask(EfficiencyBenchmarkWrapper, HFDatasetsTask):
-    def __init__(
-        self,
-        dataset_path: str,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
-    ):
-        HFDatasetsTask.__init__(
-            self, 
-            dataset_path=dataset_path, 
-            dataset_name=dataset_name, 
-            version_override=version_override
-        )
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            # EfficiencyBenchmarkMrqaTask._conversion()
-            identity_conversion()
-        )
-
-
-class EfficiencyBenchmarkMetaICLTask(EfficiencyBenchmarkWrapper, MetaICLTask):
-    def __init__(
-        self,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
-    ):
-        self.dataset_path = "allenai/metaicl-data"
-        MetaICLTask.__init__(self, dataset_name, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            identity_conversion()
-            # EfficiencyBenchmarkMetaICLTask._conversion()
-        )
-
-    @staticmethod
-    def _conversion(
-        *,
-        id_field: str="id",
-    ) -> InstanceConversion:
-        def convert(instance: Dict[str, Any]) -> EfficiencyBenchmarkInstance:
-            try:
-                output = instance.pop("output")
-            except:
-                output = None
-            return EfficiencyBenchmarkInstance(
-                id=get_from_dict(instance, id_field, missing_ok=True),
-                input=instance,
-                target=output
-            )
-        return convert
-    
-
-class EfficiencyBenchmarkP3Task(EfficiencyBenchmarkWrapper, P3Task):
-    def __init__(
-        self,
-        dataset_name: Optional[str] = None,
-        *,
-        version_override: Optional[str] = None
-    ):
-        self.dataset_path = "bigscience/P3"
-        P3Task.__init__(self, dataset_name, version_override=version_override)
-        EfficiencyBenchmarkWrapper.__init__(self)
-        self.add_instance_conversion(
-            InstanceFormat.EFFICIENCY_BENCHMARK,
-            identity_conversion()
-        )
-
+    # We're doing this in this stupid way because this makes the conversion function picklable.
+    return functools.partial(convert, **kwargs)
