@@ -1,5 +1,6 @@
 import json
 import itertools
+import spacy
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -14,6 +15,7 @@ from efficiency_benchmark.task import Task
 from efficiency_benchmark.tasks import TASKS, EfficiencyBenchmarkTask
 from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkInstance
 
+tokenizer = spacy.load("en_core_web_sm")
 EXPECTED_BATCH_SIZE = 128
 NUM_BATCHES = 1000
 
@@ -126,7 +128,8 @@ class PredictStep():
         print(f"Total energy: {metrics['total_energy']: .2e} kWh.")
         print(f"CO2 emission: {metrics['carbon']: .2e} kg.")
         print(f"Throughput: {metrics['throughput']: .2f} instances / s.")
-        print(f"Throughput: {metrics['throughput_words']: .2f} words / s.")
+        print(f"Throughput (words): {metrics['throughput_words']: .2f} words / s.")
+        print(f"Throughput (tokens): {metrics['throughput_tokens']: .2f} words / s.")
         if self.scenario != "offline":
             metrics["latency"] = metrics["time"] / self.num_batches
             print(f"Latency: {metrics['latency'] * 1000: .2f} ms / batch.")
@@ -153,10 +156,11 @@ class PredictStep():
         for output_batch in self.predictor.predict(input_batches=self.input_batches, max_batch_size=self.max_batch_size):
             output_batches.append(output_batch)
         efficiency_metrics = self.profiler.stop()
-        results, num_output_words = self.process(output_batches)
+        results, num_output_words, num_output_tokens  = self.process(output_batches)
 
         efficiency_metrics["throughput"] = self.num_instances / efficiency_metrics["time"]
         efficiency_metrics["throughput_words"] = num_output_words / efficiency_metrics["time"]
+        efficiency_metrics["throughput_tokens"] = num_output_tokens / efficiency_metrics["time"]
         return results, efficiency_metrics
 
     def run_offline(self) -> Tuple[Sequence[Any], Dict[str, Any]]:
@@ -186,6 +190,7 @@ class PredictStep():
         yielded_label_index = -1
         results = []
         num_output_words = 0
+        num_output_tokens = 0
         for output in output_batches:
             yielded_label_index += 1
             output = output.rstrip()
@@ -199,6 +204,7 @@ class PredictStep():
                     {metric_name: (output, target) for metric_name in self.task.metrics.keys()}
                 )
             num_output_words += len(output.split())
+            num_output_tokens += len(tokenizer(output))
             results.append(result)
         return results, num_output_words
             
