@@ -129,7 +129,7 @@ class PredictStep():
         print(f"CO2 emission: {metrics['carbon']: .2e} kg.")
         print(f"Throughput: {metrics['throughput']: .2f} instances / s.")
         print(f"Throughput (words): {metrics['throughput_words']: .2f} words / s.")
-        print(f"Throughput (tokens): {metrics['throughput_tokens']: .2f} words / s.")
+        print(f"Throughput (tokens): {metrics['throughput_tokens']: .2f} tokens / s.")
         if self.scenario != "offline":
             metrics["latency"] = metrics["time"] / self.num_batches
             print(f"Latency: {metrics['latency'] * 1000: .2f} ms / batch.")
@@ -206,7 +206,7 @@ class PredictStep():
             num_output_words += len(output.split())
             num_output_tokens += len(tokenizer(output))
             results.append(result)
-        return results, num_output_words
+        return results, num_output_words, num_output_tokens
             
 
 class CalculateMetricsStep():
