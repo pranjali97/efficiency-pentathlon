@@ -20,8 +20,8 @@ click_help_colors==0.9.1
 sqlitedict==2.1.0
 pyserial==3.5
 pytest
--m spacy download en_core_web_sm
-
+spacy>=2.2.0,<3.0.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-2.2.0/en_core_web_sm-2.2.0.tar.gz#egg=en_core_web_sm
 # For the P3 datasets, which we get from huggingface datasets
 protobuf<=3.20
 
