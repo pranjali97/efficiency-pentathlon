@@ -1,6 +1,5 @@
 import json
 import itertools
-import spacy
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -9,13 +8,16 @@ import numpy as np
 import torch
 from datasets import Dataset
 
+import sys
+sys.path.append("/home/pranjalib/LLM")
+from hf_olmo import *
 from efficiency_benchmark.efficiency.profiler import Profiler
 from efficiency_benchmark.stdio_wrapper import StdioWrapper
 from efficiency_benchmark.task import Task
 from efficiency_benchmark.tasks import TASKS, EfficiencyBenchmarkTask
 from efficiency_benchmark.tasks.efficiency_benchmark import EfficiencyBenchmarkInstance
-
-tokenizer = spacy.load("en_core_web_sm")
+olmo_checkpoint='/net/nfs.cirrascale/allennlp/akshitab/olmo-models/olmo-1b/'
+tokenizer = OLMoTokenizerFast.from_pretrained(olmo_checkpoint)
 EXPECTED_BATCH_SIZE = 128
 NUM_BATCHES = 1000
 
@@ -204,7 +206,7 @@ class PredictStep():
                     {metric_name: (output, target) for metric_name in self.task.metrics.keys()}
                 )
             num_output_words += len(output.split())
-            num_output_tokens += len(tokenizer(output))
+            num_output_tokens += len(tokenizer.tokenize(output))
             results.append(result)
         return results, num_output_words, num_output_tokens
             
